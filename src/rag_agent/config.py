@@ -272,7 +272,7 @@ class EmbeddingFactory:
         from langchain_community.embeddings import HuggingFaceEmbeddings
 
         return HuggingFaceEmbeddings(
-              dmodel_name=self.settings.embedding_model
+              model_name=self._settings.embedding_model
 )
 
     def _create_openai(self):

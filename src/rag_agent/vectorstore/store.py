@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import chromadb
 
 from loguru import logger
 
@@ -73,16 +74,32 @@ class VectorStoreManager:
         RuntimeError
             If ChromaDB cannot be initialised at the configured path.
         """
-        # TODO: implement
-        # 1. Ensure Path(self._settings.chroma_db_path).mkdir(parents=True, exist_ok=True)
-        # 2. chromadb.PersistentClient(path=self._settings.chroma_db_path)
-        # 3. client.get_or_create_collection(
-        #        name=self._settings.chroma_collection_name,
-        #        metadata={"hnsw:space": "cosine"}   # cosine similarity
-        #    )
-        # 4. Log successful initialisation with collection name and item count
-        raise NotImplementedError
+        try:
+    # Ensure the ChromaDB directory exists
+            Path(self._settings.chroma_db_path).mkdir(parents=True, exist_ok=True)
 
+    # Create/connect to the persistent ChromaDB database
+            self._client = chromadb.PersistentClient(
+                path=str(self._settings.chroma_db_path)
+            )
+
+    # Create or retrieve the collection
+            self._collection = self._client.get_or_create_collection(
+                name=self._settings.chroma_collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )   
+
+            logger.info(
+                "ChromaDB initialized: collection=%s, count=%d",
+                self._settings.chroma_collection_name,
+                self._collection.count(),
+            )
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize ChromaDB at "
+                f"{self._settings.chroma_db_path}: {exc}"
+            ) from exc
     # -----------------------------------------------------------------------
     # Duplicate Detection
     # -----------------------------------------------------------------------

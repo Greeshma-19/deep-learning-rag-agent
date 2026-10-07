@@ -22,7 +22,7 @@ PEP 8 | OOP | Single Responsibility
 from __future__ import annotations
 
 from pathlib import Path
-
+import tempfile
 import streamlit as st
 
 from rag_agent.agent.graph import get_compiled_graph
@@ -116,28 +116,48 @@ def render_ingestion_panel(
     """
     st.sidebar.header("📂 Corpus Ingestion")
 
-    # TODO: implement
-    # 1. st.sidebar.file_uploader(
-    #        "Upload study materials",
-    #        type=["pdf", "md"],
-    #        accept_multiple_files=True
-    #    )
-    #
-    # 2. "Ingest Documents" button — only enabled when files are selected
-    #
-    # 3. On button click:
-    #    a. Save uploaded files to a temp directory
-    #    b. chunker.chunk_files(file_paths)
-    #    c. store.ingest(chunks) → IngestionResult
-    #    d. Display result: st.success / st.warning / st.error
-    #       Show: "{result.ingested} chunks added, {result.skipped} duplicates skipped"
-    #    e. Refresh ingested documents list in session_state
-    #
-    # 4. Render ingested documents list below the uploader
-    #    For each document: show source name, topic, chunk count
-    #    Add a small "🗑 Remove" button per document that calls store.delete_document()
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload study materials",
+        type=["pdf", "md"],
+        accept_multiple_files=True,
+    )
 
-    st.sidebar.info("Upload .pdf or .md files to populate the corpus.")
+    if uploaded_files:
+        st.sidebar.success(
+            f"{len(uploaded_files)} file(s) selected."
+        )
+    ingest_clicked = st.sidebar.button(
+        "Ingest Documents",
+        disabled=not uploaded_files,
+        use_container_width=True,
+    )
+    if ingest_clicked and uploaded_files:
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                file_paths = []
+
+                for uploaded_file in uploaded_files:
+                    file_path = Path(temp_dir) / uploaded_file.name
+                    file_path.write_bytes(uploaded_file.getvalue())
+                    file_paths.append(file_path)
+
+                chunks = chunker.chunk_files(file_paths)
+                result = store.ingest(chunks)
+
+            if result.ingested > 0:
+                st.sidebar.success(
+                    f"{result.ingested} chunks added, "
+                    f"{result.skipped} duplicates skipped."
+                )
+            elif result.skipped > 0:
+                st.sidebar.warning(
+                    f"{result.skipped} duplicate chunks skipped."
+                )
+            else:
+                st.sidebar.warning("No chunks were generated.")
+
+        except Exception as exc:
+            st.sidebar.error(f"Ingestion failed: {exc}")
 
 
 def render_corpus_stats(store: VectorStoreManager) -> None:
@@ -180,24 +200,55 @@ def render_document_viewer(store: VectorStoreManager) -> None:
     """
     st.subheader("📄 Document Viewer")
 
-    # TODO: implement
-    # 1. If no documents ingested: show placeholder message
-    #
-    # 2. st.selectbox("Select document", options=[doc["source"] for doc in docs])
-    #    Store selection in st.session_state["selected_document"]
-    #
-    # 3. On selection change: store.get_document_chunks(selected_source)
-    #
-    # 4. Render chunks in a scrollable container (st.container with fixed height)
-    #    For each chunk:
-    #    - Show metadata badge: topic | difficulty | type
-    #    - Show chunk text
-    #    - Show similarity score if this chunk was used in last response
-    #
-    # 5. Display chunk count and coverage summary below viewer
+    docs = store.list_documents()
 
-    st.info("Ingest documents using the sidebar to view content here.")
+    if not docs:
+        st.info("Ingest documents using the sidebar to view content here.")
+        return
 
+    sources = [doc["source"] for doc in docs]
+
+    selected_source = st.selectbox(
+        "Select document",
+        options=sources,
+        key="selected_document",
+    )
+
+    if selected_source:
+        chunks = store.get_document_chunks(selected_source)
+
+        selected_doc = next(
+            (doc for doc in docs if doc["source"] == selected_source),
+            None,
+        )
+
+        if selected_doc:
+            st.caption(
+                f"Topic: {selected_doc['topic']} | "
+                f"Chunks: {selected_doc['chunk_count']}"
+            )
+
+        if not chunks:
+            st.warning("No chunks found for this document.")
+            return
+
+        with st.container(height=500):
+            for index, chunk in enumerate(chunks, start=1):
+                metadata = chunk.metadata
+
+                st.markdown(
+                    f"**Chunk {index}** — "
+                    f"`{metadata.topic}` | "
+                    f"`{metadata.difficulty}` | "
+                    f"`{metadata.type}`"
+                )
+
+                st.write(chunk.chunk_text)
+                st.divider()
+
+        st.info(
+            f"Showing {len(chunks)} chunks from {selected_source}."
+        )
 
 # ---------------------------------------------------------------------------
 # Chat Interface Panel (Right)
