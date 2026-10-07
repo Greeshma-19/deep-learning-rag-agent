@@ -129,10 +129,8 @@ class VectorStoreManager:
         robust than filename-based deduplication because it detects identical
         content even when files are renamed or re-uploaded.
         """
-        # TODO: implement
-        # self._collection.get(ids=[chunk_id])
-        # Return True if the result contains the ID, False otherwise
-        raise NotImplementedError
+        result = self._collection.get(ids=[chunk_id])
+        return len(result["ids"]) > 0
 
     # -----------------------------------------------------------------------
     # Ingestion
@@ -166,20 +164,33 @@ class VectorStoreManager:
         batch size is a production pattern that prevents OOM errors when
         ingesting large document sets.
         """
-        # TODO: implement
-        # result = IngestionResult()
-        # For each chunk:
-        #   - check_duplicate(chunk.chunk_id) → if True, result.skipped += 1, continue
-        #   - embed chunk.chunk_text using self._embeddings.embed_documents([chunk.chunk_text])
-        #   - self._collection.upsert(
-        #         ids=[chunk.chunk_id],
-        #         embeddings=[embedding],
-        #         documents=[chunk.chunk_text],
-        #         metadatas=[chunk.metadata.to_dict()]
-        #     )
-        #   - result.ingested += 1
-        # Log summary and return result
-        raise NotImplementedError
+        result = IngestionResult()
+
+        for chunk in chunks:
+            if self.check_duplicate(chunk.chunk_id):
+                result.skipped += 1
+                continue
+
+            embedding = self._embeddings.embed_documents(
+                [chunk.chunk_text]
+            )[0]
+
+            self._collection.upsert(
+                ids=[chunk.chunk_id],
+                embeddings=[embedding],
+                documents=[chunk.chunk_text],
+                metadatas=[chunk.metadata.to_dict()],
+            )
+
+            result.ingested += 1
+
+        logger.info(
+          "Ingestion complete: %d ingested, %d skipped",
+           result.ingested,
+           result.skipped,
+        )
+
+        return result
 
     # -----------------------------------------------------------------------
     # Retrieval
@@ -222,20 +233,55 @@ class VectorStoreManager:
         a critical production RAG pattern — the system must know what it
         does not know.
         """
-        # TODO: implement
-        # k = k or self._settings.retrieval_k
-        # Build where_filter dict from topic_filter and difficulty_filter if provided
-        # Embed query_text using self._embeddings.embed_query(query_text)
-        # self._collection.query(
-        #     query_embeddings=[query_embedding],
-        #     n_results=k,
-        #     where=where_filter,      # None if no filters
-        #     include=["documents", "metadatas", "distances"]
-        # )
-        # Convert distances to similarity scores: score = 1 - distance (for cosine)
-        # Filter out chunks below self._settings.similarity_threshold
-        # Return list of RetrievedChunk objects sorted by score descending
-        raise NotImplementedError
+        k = k or self._settings.retrieval_k
+
+        where_filter = {}
+        if topic_filter:
+            where_filter["topic"] = topic_filter
+        if difficulty_filter:
+            where_filter["difficulty"] = difficulty_filter
+
+        if not where_filter:
+            where_filter = None
+
+        query_embedding = self._embeddings.embed_query(query_text)
+
+        results = self._collection.query(
+            query_embeddings=[query_embedding],
+            n_results=k,
+            where=where_filter,
+            include=["documents", "metadatas", "distances"],
+        )
+        retrieved_chunks = []
+
+        ids = results.get("ids", [[]])[0]
+        documents = results.get("documents", [[]])[0]
+        metadatas = results.get("metadatas", [[]])[0]
+        distances = results.get("distances", [[]])[0]
+
+        for chunk_id, document, metadata, distance in zip(
+            ids, documents, metadatas, distances
+        ):
+            score = 1.0 - distance
+
+            if score < self._settings.similarity_threshold:
+                continue
+
+            retrieved_chunks.append(
+                RetrievedChunk(
+                    chunk_id=chunk_id,
+                    chunk_text=document,
+                    metadata=ChunkMetadata(**metadata),
+                    score=score,
+                )
+            )
+
+        retrieved_chunks.sort(
+            key=lambda chunk: chunk.score,
+            reverse=True,
+        )
+
+        return retrieved_chunks
 
     # -----------------------------------------------------------------------
     # Corpus Inspection
@@ -252,11 +298,32 @@ class VectorStoreManager:
         list[dict]
             Each item contains: source (str), topic (str), chunk_count (int).
         """
-        # TODO: implement
-        # Query all metadata from the collection
-        # Group by metadata["source"] and count chunks per source
-        # Return sorted list of dicts
-        raise NotImplementedError
+        results = self._collection.get(
+            include=["metadatas"]
+        )
+
+        documents = {}
+
+        for metadata in results.get("metadatas", []):
+            if not metadata:
+                continue
+
+            source = metadata.get("source", "unknown")
+            topic = metadata.get("topic", "")
+
+            if source not in documents:
+                documents[source] = {
+                    "source": source,
+                    "topic": topic,
+                    "chunk_count": 0,
+                }
+
+            documents[source]["chunk_count"] += 1
+
+        return sorted(
+            documents.values(),
+            key=lambda item: item["source"],
+        )
 
     def get_document_chunks(self, source: str) -> list[DocumentChunk]:
         """
@@ -275,10 +342,29 @@ class VectorStoreManager:
             All chunks from this source, ordered by their position
             in the original document.
         """
-        # TODO: implement
-        # self._collection.get(where={"source": source}, include=["documents", "metadatas"])
-        # Reconstruct DocumentChunk objects from results
-        raise NotImplementedError
+        results = self._collection.get(
+            where={"source": source},
+            include=["documents", "metadatas"],
+        )
+
+        chunks = []
+
+        ids = results.get("ids", [])
+        documents = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
+
+        for chunk_id, document, metadata in zip(
+            ids, documents, metadatas
+        ):
+            chunks.append(
+                DocumentChunk(
+                    chunk_id=chunk_id,
+                    chunk_text=document,
+                    metadata=ChunkMetadata(**metadata),
+                )
+            )
+
+        return chunks
 
     def get_collection_stats(self) -> dict:
         """
@@ -309,6 +395,18 @@ class VectorStoreManager:
         int
             Number of chunks deleted.
         """
-        # TODO: implement
-        # self._collection.delete(where={"source": source})
-        raise NotImplementedError
+        results = self._collection.get(
+           where={"source": source},
+           include=[]
+        )
+
+        deleted_count = len(results["ids"])
+
+        if deleted_count > 0:
+           self._collection.delete(where={"source": source})
+           
+        logger.info(
+            f"Deleted {deleted_count} chunks from document: {source}"
+        )   
+
+        return deleted_count
