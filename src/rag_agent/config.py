@@ -178,8 +178,8 @@ class LLMFactory:
         from langchain_groq import ChatGroq
 
         return ChatGroq(
-             model=self.settings.groq_model,
-             api_key=self.settings.groq_api_key,
+             model=self._settings.groq_model,
+             api_key=self._settings.groq_api_key,
 )
 
     def _create_ollama(self) -> BaseChatModel:

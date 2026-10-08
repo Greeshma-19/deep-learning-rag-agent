@@ -55,18 +55,42 @@ def query_rewrite_node(state: AgentState) -> dict:
     dict
         Updates: original_query, rewritten_query.
     """
-    # TODO: implement
-    # 1. Extract the latest HumanMessage from state.messages as original_query
-    # 2. Build a short prompt instructing the LLM to rewrite for vector search
-    #    Keep the rewriting prompt lightweight — this adds latency
-    # 3. Call llm.invoke() with the rewrite prompt
-    # 4. Return {"original_query": original_query, "rewritten_query": rewritten}
-    #
-    # Fallback: if rewriting fails (API error, timeout), return the original
-    # query unchanged so the graph continues gracefully
-    raise NotImplementedError
+    human_messages = [
+        message for message in state["messages"]
+        if isinstance(message, HumanMessage)
+    ]
 
+    if not human_messages:
+        return {
+            "original_query": "",
+            "rewritten_query": "",
+        }
 
+    original_query = human_messages[-1].content
+
+    rewrite_prompt = (
+        "Rewrite the following user question into a concise search query "
+        "optimized for vector similarity retrieval from deep learning study "
+        "materials. Preserve the technical meaning and important keywords. "
+        "Return only the rewritten query.\n\n"
+        f"User question: {original_query}"
+    )
+
+    try:
+        llm = LLMFactory.create()
+        response = llm.invoke(rewrite_prompt)
+        rewritten_query = response.content.strip()
+
+        return {
+            "original_query": original_query,
+            "rewritten_query": rewritten_query or original_query,
+        }
+
+    except Exception:
+        return {
+            "original_query": original_query,
+            "rewritten_query": original_query,
+        }
 # ---------------------------------------------------------------------------
 # Node: Retriever
 # ---------------------------------------------------------------------------
@@ -104,7 +128,24 @@ def retrieval_node(state: AgentState) -> dict:
     #    )
     # 3. If result is empty: return {"retrieved_chunks": [], "no_context_found": True}
     # 4. Otherwise: return {"retrieved_chunks": chunks, "no_context_found": False}
-    raise NotImplementedError
+    manager = VectorStoreManager()
+
+    chunks = manager.query(
+        query_text=state["rewritten_query"],
+        topic_filter=state.get("topic_filter"),
+        difficulty_filter=state.get("difficulty_filter"),
+    )
+
+    if not chunks:
+        return {
+            "retrieved_chunks": [],
+            "no_context_found": True,
+        }
+
+    return {
+        "retrieved_chunks": chunks,
+        "no_context_found": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +186,7 @@ def generation_node(state: AgentState) -> dict:
     llm = LLMFactory(settings).create()
 
     # ---- Hallucination Guard -----------------------------------------------
-    if state.no_context_found:
+    if state.get("no_context_found", False):
         no_context_message = (
             "I was unable to find relevant information in the corpus for your query. "
             "This may mean the topic is not yet covered in the study material, or "
@@ -157,7 +198,7 @@ def generation_node(state: AgentState) -> dict:
             sources=[],
             confidence=0.0,
             no_context_found=True,
-            rewritten_query=state.rewritten_query,
+            rewritten_query=state.get("rewritten_query", ""),
         )
         return {
             "final_response": response,
@@ -165,20 +206,84 @@ def generation_node(state: AgentState) -> dict:
         }
 
     # ---- Build Context from Retrieved Chunks --------------------------------
-    # TODO: implement
-    # 1. Format retrieved chunks into a context string with citations
-    #    Each chunk should appear as: "[SOURCE: topic | file]\n{chunk_text}\n"
-    # 2. Calculate average confidence score from chunk scores
-    # 3. Build the full prompt:
-    #    - SystemMessage with SYSTEM_PROMPT
-    #    - Context message with formatted chunks
-    #    - Trimmed conversation history (trim to max_context_tokens)
-    #    - HumanMessage with original_query
-    # 4. llm.invoke(messages)
-    # 5. Construct AgentResponse with answer, sources (list of citations), confidence
-    # 6. Append AIMessage to messages
-    # 7. Return {"final_response": response, "messages": [new_ai_message]}
-    raise NotImplementedError
+        # ---- Build Context from Retrieved Chunks -------------------------------
+    context_parts = []
+    sources = []
+
+    for chunk in state.get("retrieved_chunks", []):
+        citation = chunk.to_citation()
+        sources.append(citation)
+
+        context_parts.append(
+            f"[SOURCE: {chunk.metadata.topic} | {chunk.metadata.source}]\n"
+            f"{chunk.chunk_text}\n"
+        )
+
+    context = "\n".join(context_parts)
+
+    # Calculate average confidence score
+    confidence = (
+        sum(chunk.score for chunk in state.get("retrieved_chunks", []))
+        / len(state.get("retrieved_chunks", []))
+    )
+
+    # Build messages for the LLM
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        SystemMessage(
+            content=(
+                "Use the following retrieved study material as context "
+                "for answering the user's question:\n\n"
+                f"{context}"
+            )
+        ),
+    ]
+
+    # Trim conversation history
+    try:
+        trimmed_history = trim_messages(
+            state.get("messages", []),
+            max_tokens=settings.max_context_tokens,
+            strategy="last",
+            token_counter="approximate",
+            include_system=False,
+            start_on="human",
+        )
+        messages.extend(trimmed_history)
+    except Exception:
+        # Safe fallback if trimming is unavailable for the current model/setup
+        messages.extend(state.get("messages", [])[-6:])
+
+    # Add original user query if it is not already the final human message
+    if not messages or not (
+        isinstance(messages[-1], HumanMessage)
+        and messages[-1].content == state.get("original_query", "")
+    ):
+        messages.append(HumanMessage(content=state.get("original_query", "")))
+
+    # Generate answer
+    llm_result = llm.invoke(messages)
+    answer = (
+        llm_result.content
+        if hasattr(llm_result, "content")
+        else str(llm_result)
+    )
+
+    # Build structured response
+    response = AgentResponse(
+        answer=answer,
+        sources=sources,
+        confidence=confidence,
+        no_context_found=False,
+        rewritten_query=state.get("rewritten_query", ""),
+    )
+
+    new_ai_message = AIMessage(content=answer)
+
+    return {
+        "final_response": response,
+        "messages": [new_ai_message],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +319,7 @@ def should_retry_retrieval(state: AgentState) -> str:
     Retry logic should be limited to one attempt to prevent infinite loops.
     Track retry count in AgentState if implementing retry behaviour.
     """
-    # TODO: implement
-    # Simple version: if no_context_found → "end", else → "generate"
-    # Advanced version: track retry count, allow one retry with broader query
-    raise NotImplementedError
+    if state.get("no_context_found", False):
+        return "end"
+
+    return "generate"

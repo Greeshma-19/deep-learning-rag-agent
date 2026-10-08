@@ -24,7 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import streamlit as st
-
+from langchain_core.messages import HumanMessage
 from rag_agent.agent.graph import get_compiled_graph
 from rag_agent.agent.state import AgentResponse
 from rag_agent.config import get_settings
@@ -310,8 +310,61 @@ def render_chat_interface(graph) -> None:
     # STRETCH GOAL — streaming:
     # Replace graph.invoke with graph.stream() and use st.write_stream()
     # to display tokens as they arrive. Significant "wow factor" in Hour 3.
+    query = st.chat_input("Ask about a deep learning topic...")
 
+    if query:
+        # Add and display the user's message
+        st.session_state.chat_history.append(
+            {
+                "role": "user",
+                "content": query,
+            }
+        )
 
+        with st.chat_message("user"):
+            st.markdown(query)
+
+        # Build LangGraph input
+        graph_input = {
+            "messages": [HumanMessage(content=query)]
+        }
+
+        config = {
+            "configurable": {
+                "thread_id": st.session_state.thread_id
+            }
+        }
+
+        try:
+            with st.spinner("Thinking..."):
+                result = graph.invoke(graph_input, config=config)
+
+            response = result["final_response"]
+
+            assistant_message = {
+                "role": "assistant",
+                "content": response.answer,
+                "sources": response.sources,
+                "no_context_found": response.no_context_found,
+            }
+
+            st.session_state.chat_history.append(assistant_message)
+
+            with st.chat_message("assistant"):
+                st.markdown(response.answer)
+
+                if response.sources:
+                    with st.expander("📎 Sources"):
+                        for source in response.sources:
+                            st.caption(source)
+
+                if response.no_context_found:
+                    st.warning(
+                        "⚠️ No relevant content found in the uploaded study materials."
+                    )
+
+        except Exception as e:
+            st.exception(e)
 # ---------------------------------------------------------------------------
 # Main Application
 # ---------------------------------------------------------------------------
